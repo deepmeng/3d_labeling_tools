@@ -7,6 +7,11 @@
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
 #include <cmath>
+#include <iomanip>
+#include <glob.h>
+#include <opencv2/opencv.hpp>
+#include <opencv2/highgui/highgui.hpp>
+
 using namespace std;
 
 vector<double> ProdCameraMat(vector<double> input, vector<double>Camera_Mat){
@@ -34,13 +39,49 @@ vector<string> split(const string &s, char delim) {
     return elems;
 }
 
-bool bbox_TorF(pcl::PointXYZ p, double x, double y, double z , double width, double height, double depth, double yaw){
-   double yaw_x = (p.x-x)*cos(M_PI/2.0-yaw)-(p.y-y)*sin(M_PI/2.0-yaw);
-   double yaw_y = (p.y-y)*sin(M_PI/2.0-yaw)+(p.x-x)*cos(M_PI/2.0-yaw);
-   if(abs(p.z - z) <= depth/2.0 && abs(yaw_x) <= width/2.0 && abs(yaw_y) <= height/2.0){
+bool bbox_TorF(pcl::PointXYZI p, double x, double y, double z , double height, double width, double depth, double yaw){
+   double yaw_x = (p.x-x)*cos(yaw/2.0)-(p.y-y)*sin(yaw/2.0);
+   double yaw_y = (p.y-y)*sin(yaw/2.0)+(p.x-x)*cos(yaw/2.0);
+   if((abs(p.z - z)*2.0 - 0.05 <= depth) && (abs(yaw_x)*2.0 - 0.05<= height) && (abs(yaw_y)*2.0 - 0.05<= width)){
        return true;
    }
    return false;
+}
+
+string calcurate_alpha(pcl::PointCloud<pcl::PointXYZI> cluster,cv::Mat cameraExtrinsicMat){
+        pcl::PointXYZ centroid;
+        for (size_t i = 0; i < cluster.points.size (); ++i)
+        {
+            pcl::PointXYZI p;
+            p.x = cluster.points[i].x;
+            p.y = cluster.points[i].y;
+            p.z = cluster.points[i].z;
+            p.intensity = cluster.points[i].intensity;
+
+            centroid.x += p.x;
+            centroid.y += p.y;
+            centroid.z += p.z;
+        }
+
+        centroid.x /= cluster.points.size ();
+        centroid.y /= cluster.points.size ();
+        centroid.z /= cluster.points.size ();
+
+        cv::Mat point(1,3,CV_64F);
+        point.at<double>(0)=double(centroid.x);
+        point.at<double>(1)=double(centroid.y);
+        point.at<double>(2)=double(centroid.z);
+        cv::Mat invR=cameraExtrinsicMat(cv::Rect(0,0,3,3)).t();
+        cv::Mat invT=-invR*(cameraExtrinsicMat(cv::Rect(3,0,1,3)));
+        point=point*invR.t()+invT.t();
+
+        double x = point.at<double>(0);
+        double z = point.at<double>(2);
+
+        double alpha = acos(x/pow(x*x+z*z,0.5));
+        stringstream ss;
+        ss << alpha;
+        return ss.str();
 }
 
 int main(int argc, char *argv[]) {
@@ -79,6 +120,15 @@ int main(int argc, char *argv[]) {
                }
         }
     }
+    cv::Mat cameraextrinsicmat;
+    cv::FileStorage fs(calibfile_name,cv::FileStorage::READ);
+    if(!fs.isOpened())
+    {
+       std::cout<<"Invalid calibration filename.";
+    }
+
+    fs["CameraExtrinsicMat"]>>cameraextrinsicmat;
+    
     string file_name = string(argv[1]) + string("/ImageSet/Main/trainval.txt");
     ifstream ifs(file_name.c_str());
     string str;
@@ -97,15 +147,25 @@ int main(int argc, char *argv[]) {
            }
         }
 
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZ>);
+        glob_t globbuf;
+        int i;
+        string semi_pcd_files = string(argv[1]) + string("/PCDPoints/") + string(str) + string("/??????.pcd");
+
+        int ret = glob(semi_pcd_files.c_str(), 0, NULL, &globbuf);
+        for (i = 0; i < globbuf.gl_pathc; i++) {
+           remove(globbuf.gl_pathv[i]);
+        }
+        globfree(&globbuf);
+
+        pcl::PointCloud<pcl::PointXYZI>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZI>);
         string pcd_files = string(argv[1]) + string("/PCDPoints/") + string(str) + string("/all.pcd");
-        if (pcl::io::loadPCDFile<pcl::PointXYZ> (pcd_files.c_str(), *cloud) == -1){
+        if (pcl::io::loadPCDFile<pcl::PointXYZI> (pcd_files.c_str(), *cloud) == -1){
            PCL_ERROR ("Couldn't read pcd file \n");
            return (-1);
         }
-        vector<pcl::PointCloud<pcl::PointXYZ> > clusters;
+        vector<pcl::PointCloud<pcl::PointXYZI> > clusters;
         for (size_t i = 0; i < annotations_data.size (); ++i){
-            pcl::PointCloud<pcl::PointXYZ> cluster;
+            pcl::PointCloud<pcl::PointXYZI> cluster;
             clusters.push_back(cluster);
         }
         for (size_t i = 0; i < cloud->points.size (); ++i){
@@ -120,8 +180,8 @@ int main(int argc, char *argv[]) {
                       position_cam[0],
                       position_cam[1],
                       position_cam[2],
-                      strtod(annotations_data[j][9].c_str(),NULL),
                       strtod(annotations_data[j][8].c_str(),NULL),
+                      strtod(annotations_data[j][9].c_str(),NULL),
                       strtod(annotations_data[j][10].c_str(),NULL),
                       strtod(annotations_data[j][14].c_str(),NULL))){
 
@@ -129,24 +189,26 @@ int main(int argc, char *argv[]) {
 
             }}
       }
+
+        remove(annotation_file_name.c_str());
+        ofstream outputfile(annotation_file_name.c_str());
+
+        int result_num = 0;
         for(size_t i = 0; i < clusters.size (); ++i){
-           cout << clusters[i].points.size() << ",";
-        }
-        cout << "\n";
-
-        string  output_file_name =  string("pcd_data.pcd");
-        clusters[0].width = 1;
-        clusters[0].height = clusters[0].points.size ();
-        pcl::io::savePCDFileASCII (output_file_name.c_str() , clusters[0]);
+           if(clusters[i].points.size ()!=0){
+           ostringstream oss;
+           oss << setfill('0') << right << setw(6) << result_num;
+           string  output_file_name =  string(argv[1]) + string("/PCDPoints/") + string(str) + string("/") + oss.str() + string(".pcd");
+           clusters[i].width = 1;
+           clusters[i].height = clusters[i].points.size ();
+           pcl::io::savePCDFileASCII (output_file_name.c_str() , clusters[i]);
+           string alpha = calcurate_alpha(clusters[i],cameraextrinsicmat);
+           outputfile << annotations_data[i][0] << " " << annotations_data[i][1] << " " << annotations_data[i][2] << " " << alpha << " " << annotations_data[i][4] << " " << annotations_data[i][5] << " " << annotations_data[i][6] << " " << annotations_data[i][7] << " " << annotations_data[i][8] << " " << annotations_data[i][9] << " " << annotations_data[i][10] << " " << annotations_data[i][11] << " " << annotations_data[i][12] << " " << annotations_data[i][13] << " " << annotations_data[i][14] << " " << annotations_data[i][15] <<"\n";
+           
+           result_num++;
+        }}
+        outputfile.close();
     }
     }
-
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud (new pcl::PointCloud<pcl::PointXYZ>);
-    string pcd_files = string(argv[1]) + string("/PCDPoints/000001/000001.pcd");
-    if (pcl::io::loadPCDFile<pcl::PointXYZ> (pcd_files.c_str(), *cloud) == -1){
-       PCL_ERROR ("Couldn't read pcd file \n");
-       return (-1);
-    }
-    cout << cloud->points.size();
     return 0;
 }
